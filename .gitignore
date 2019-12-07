@@ -1,0 +1,6 @@
+*.wav
+*.pdf
+*.reapeaks
+__pycache__
+*.csv
+*.pyc
