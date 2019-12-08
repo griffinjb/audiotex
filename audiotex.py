@@ -1,10 +1,12 @@
 import numpy as np 
 import matplotlib.pyplot as plt 
 from scipy.io import wavfile
+from scipy.interpolate import interp1d
 
 # Reference Material:
 	# https://arxiv.org/pdf/1510.02189.pdf - Sparse approximation based on a random overcomplete basis
-	
+	# http://dafx16.vutbr.cz/dafxpapers/16-DAFx-16_paper_07-PN.pdf - cross fade
+	# http://eeweb.poly.edu/iselesni/EL713/STFT/stft_inverse.pdf - STFT, ISTFT
 
 # Lets start simple.
 
@@ -37,7 +39,8 @@ from scipy.io import wavfile
 def X_gen():
 	fmod = 523.25
 	t = np.linspace(0,10,10*44100)
-	signal = np.sin(fmod*2*np.pi*t) + .3*np.sin(1.2*fmod*2*np.pi*t) + .1*np.sin(1.4*fmod*2*np.pi*t)
+	# signal = np.sin(fmod*2*np.pi*t) + .7*np.sin(2*fmod*2*np.pi*t) + .7*np.sin(3*fmod*2*np.pi*t)
+	signal = np.sin(fmod*2*np.pi*t) + np.sin(2*fmod*2*np.pi*t)
 	while 1:
 		for sample in signal:
 			yield(sample)
@@ -83,6 +86,34 @@ def window_gen(gen,N,step=1):
 			if not ctr%step:
 				yield(window)
 				ctr = 0
+
+def sin_window_gen(gen,N,step=1):
+
+	noverlap = N-step
+
+	window = np.zeros(N)
+
+	ctr = 0
+
+	for sample in gen:
+		window = np.roll(window,1)
+		window[0] = sample
+
+		ctr += 1
+		if not ctr % step:
+			ctr = 0
+			shaped_window = window.copy()
+			shaped_window[:noverlap] *= sin_half_window(noverlap,'start')
+			shaped_window[-noverlap:] *= sin_half_window(noverlap,'end')
+
+			yield(shaped_window)
+
+def sin_half_window(N,start_end='start'):
+	if start_end == 'start':
+		return(np.sin(np.pi*np.linspace(0,N-1,N)/2/N))
+
+	if start_end == 'end':
+		return(np.sin(np.pi*np.linspace(N,2*N,N)/2/N))
 
 def plt_gen(gen,figure_name,skip=20,db=False):
 	ctr = 0
@@ -246,6 +277,83 @@ def liveplot(data,fig_name,dim=2):
 		plt.plot(data)
 	plt.pause(.001)
 
+def spectrogram(X,N_samples=512,noverlap=0):
+	stft = np.log10(np.array([fft for fft in abs_gen(rfft_gen(window_gen(X,N_samples,N_samples-noverlap)))]))
+	return(stft)
+
+def crossfade(x1,x2):
+	# window1 = np.sqrt(.5*(1-np.linspace(-1,1,len(x1))))
+	# window2 = np.sqrt(.5*(1+np.linspace(-1,1,len(x1))))
+	# x1mod = x1 * window1
+	# x2mod = x2 * window2
+	# return(x1mod+x2mod)
+
+	# return(np.linspace(x1[0],x2[-1],len(x1)))
+	
+	x_start = np.linspace(1,len(x1)/4,int(len(x1)/4))
+	x_end = x_start + .75*len(x1)
+	x = np.hstack([x_start,x_end])
+
+	y = np.hstack([x1[:int(len(x1)/4)],x2[-int(len(x1)/4):]])
+
+	interpolator = interp1d(x,y,kind='cubic')
+
+	return(interpolator(np.linspace(1,len(x1),len(x1))))
+
+class codebook:
+
+	def __init__(self,N_codes,N_dim,estimator='LMS',update_mode='recency'):
+
+		self.N_codes = N_codes
+		self.N_dim = N_dim
+		self.cdbk = np.zeros(N_codes,N_dim)
+		self.estimator = estimator
+		self.update_mode = update_mode
+
+	def update(self,new_sample):
+		
+		if self.update_mode == 'recency':
+			print('')
+
+		# distances = np.zeros(self.N_codes)
+		# for row in range(self.cdbk.shape[0]):
+		# 	code = self.cdbk[row,:]
+		# 	distances[row] = np.linalg.norm(new_sample-code)
+
+		# Initialize 0
+
+		# If 0, replace with new sample
+
+		# If no 0, 
+
+
+		# We want to maximize the sum of the angles
+			# Between the codes, including new sample
+
+		# Assume codebook size equals the number of notes
+
+		# Then, the optimal codes will maximize thae sum
+		# of angles between the codes
+
+		# If the notes/codes form a convex hull, (bold)
+		# then a new sample will be assigned as a code
+		# if it has non-zero additive estimation error
+		# This code will replace it's nearest neighbor (angle)
+
+		# Codes are unit vectors
+
+
+
+
+
+
+
+
+	def estimate(self,target):
+		if self.estimator == 'LMS':
+			w = np.linalg.pinv(self.cdbk.T)@(target[:,None])
+			return((dictionary.T@w)[:,0])
+
 def test_1():
 	# fn_codebook = 'violin_AM.wav'
 	# fn_target   = 'nu_beet-002.wav'
@@ -358,28 +466,130 @@ def test_2():
 def test_3():
 
 	N = 512
-	noverlap = 16
+	noverlap = 64
+	codebook_nrows = 1
+	codebook_ncols = int(N/2)+1
 
-	# Windowing Overlap
+	fn_codebook = 'flute_C.wav'
 
-	codebook_signal = abs_gen(rfft_gen(window_gen(X_gen(),N,N-noverlap)))
-	tonal_driver = abs_gen(rfft_gen(window_gen(X_gen(),N,N-noverlap)))
-	phase_driver = phase_gen(rfft_gen(window_gen(X_gen(),N,N-noverlap)))
+	codebook_signal = 	abs_gen(rfft_gen(window_gen(wav_gen(fn_codebook),N,N)))
+	# codebook_signal = abs_gen(rfft_gen(window_gen(X_gen(),N,N-noverlap)))
+	tonal_driver = abs_gen(rfft_gen(window_gen(Y_gen(),N,N-noverlap)))
+	phase_driver = phase_gen(rfft_gen(window_gen(Y_gen(),N,N-noverlap)))
+
+	if noverlap:
+		overlap_buffer = np.zeros(noverlap)
+
+	codebook = np.zeros([codebook_nrows,codebook_ncols])
+
+	ctr = 0
+
+	# Iterate signals
+	for cdbk_sample,tonal_sample,phase_sample in zip(codebook_signal,tonal_driver,phase_driver):
+
+		# Update Codebook
+
+		# Update
+		codebook = np.roll(codebook,1,axis=0)
+		codebook[0,:] = cdbk_sample
+	
+		# Fit
+		reconstruction = dictionary_estimator(codebook,tonal_sample)
+		
+		if not ctr%20 and 0:
+			liveplot(codebook,'cdbk')
+			liveplot(reconstruction,'re',1)
+			liveplot(tonal_sample,'tonal',1)
+			liveplot(tonal_sample-reconstruction,'error',1)
+			ctr = 0
+		ctr += 1
+		
+ 		# Replace
+		signal_out = np.flip(np.fft.irfft(reconstruction*np.exp(1j*phase_sample)))
+
+		# Overlap crossfade
+		if noverlap:
+			signal_out[:noverlap] = crossfade(overlap_buffer,signal_out[:noverlap])
+			overlap_buffer = signal_out[-noverlap:]
+
+			# yield(signal_out)
+			yield(signal_out[:-noverlap])
+		else:
+			yield(signal_out)
+
+def test_4():
+
+	N = 1024
+	noverlap = 64
+	codebook_nrows = 1
+	codebook_ncols = int(N/2)+1
+
+	fn_codebook = 'flute_C.wav'
+
+	# codebook_signal = 	abs_gen(rfft_gen(sin_window_gen(wav_gen(fn_codebook),N,N-noverlap)))
+	codebook_signal = abs_gen(rfft_gen(sin_window_gen(X_gen(),N,N-noverlap)))
+	tonal_driver = abs_gen(rfft_gen(sin_window_gen(X_gen(),N,N-noverlap)))
+	phase_driver = phase_gen(rfft_gen(sin_window_gen(X_gen(),N,N-noverlap)))
+
+	if noverlap:
+		overlap_buffer = np.zeros(noverlap)
+
+	codebook = np.zeros([codebook_nrows,codebook_ncols])
+
+	ctr = 0
+
+	# Iterate signals
+	for cdbk_sample,tonal_sample,phase_sample in zip(codebook_signal,tonal_driver,phase_driver):
+
+		# Update Codebook
+
+		# Update
+		codebook = np.roll(codebook,1,axis=0)
+		codebook[0,:] = cdbk_sample
+	
+		# Fit
+		reconstruction = dictionary_estimator(codebook,tonal_sample)
+		
+		if not ctr%20 and 0:
+			liveplot(codebook,'cdbk')
+			liveplot(reconstruction,'re',1)
+			liveplot(tonal_sample,'tonal',1)
+			liveplot(tonal_sample-reconstruction,'error',1)
+			ctr = 0
+		ctr += 1
+		
+ 		# Replace
+		signal_out = np.flip(np.fft.irfft(reconstruction*np.exp(1j*phase_sample)))
+
+		# Overlap crossfade
+		if noverlap:
+			# signal_out[:noverlap] = crossfade(overlap_buffer,signal_out[:noverlap])
+			signal_out[:noverlap] = sin_half_window(noverlap,'start')*signal_out[:noverlap]+sin_half_window(noverlap,'end')*overlap_buffer
+			overlap_buffer = signal_out[-noverlap:]
+
+			# yield(signal_out)
+			yield(signal_out[:-noverlap])
+		else:
+			yield(signal_out)
 
 if __name__ == '__main__':
 
 	# m = plt_gen(abs_gen(rfft_gen(plt_gen(main(),'dd',skip=1))),'ff',skip=1)
 	#test_gen = plt_gen(window_gen(test_1(),64),'test_fft',1)
-	test_gen = test_1()
+	test_gen = test_4()
 	samples = []
-	for i in range(500):
+	for i in range(200):
 		samples.append(test_gen.__next__())
 	samples /= max(abs(np.min(samples)),np.max(samples))
 	samples *= 22000
 	wavfile.write('test3.wav',44100,np.int16(np.vstack([np.hstack(samples),np.hstack(samples)])).T)
 	
 	wv = wavfile.read('test3.wav')[1]
+	plt.figure('wv form')
 	plt.plot(wv[:,0])
+	plt.figure('Spectrogram')
+	plt.imshow(spectrogram(wv[:,0]))
+
 	plt.show()
 	
 
