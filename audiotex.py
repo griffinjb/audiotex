@@ -7,6 +7,7 @@ from scipy.interpolate import interp1d
 	# https://arxiv.org/pdf/1510.02189.pdf - Sparse approximation based on a random overcomplete basis
 	# http://dafx16.vutbr.cz/dafxpapers/16-DAFx-16_paper_07-PN.pdf - cross fade
 	# http://eeweb.poly.edu/iselesni/EL713/STFT/stft_inverse.pdf - STFT, ISTFT
+	# https://sethares.engr.wisc.edu/vocoders/phasevocoder.html - Phase Vocoder
 
 # Lets start simple.
 
@@ -51,6 +52,16 @@ def Y_gen():
 	signal = np.sin(fmod*2*np.pi*t)
 	while 1:
 		for sample in signal:
+			yield(sample)
+
+def sin_gen(f,Fs):
+	if not f:
+		while 1:
+			yield(0)
+	T = 1/f 
+	wv = np.sin(f*2*np.pi*np.linspace(0,T-(1/Fs),Fs*T))
+	while 1:
+		for sample in wv:
 			yield(sample)
 
 def window_gen(gen,N,step=1):
@@ -102,11 +113,13 @@ def sin_window_gen(gen,N,step=1):
 		ctr += 1
 		if not ctr % step:
 			ctr = 0
-			shaped_window = window.copy()
-			shaped_window[:noverlap] *= sin_half_window(noverlap,'start')
-			shaped_window[-noverlap:] *= sin_half_window(noverlap,'end')
-
-			yield(shaped_window)
+			if noverlap:
+				shaped_window = window.copy()
+				shaped_window[:noverlap] *= sin_half_window(noverlap,'start')
+				shaped_window[-noverlap:] *= sin_half_window(noverlap,'end')
+				yield(shaped_window)
+			else:
+				yield(window)
 
 def sin_half_window(N,start_end='start'):
 	if start_end == 'start':
@@ -217,16 +230,6 @@ def out_dictionary_estimator(dictionary,target,mu=1e-14,max_iter=1000):
 	liveplot(gradients,'gradients',dim=1)
 	return(np.sum(W*dictionary,axis=0))
 
-def dictionary_gen(source_signal):
-	for window in window_gen(source_signal,32):
-		yield(window)
-
-def dictionary_update(new_sample,rank_function,d_in=None):
-	print('')
-	# Score
-
-	# remove lowest score
-
 def rank_by_recency(d_in):
 	return(d_in)
 
@@ -300,20 +303,36 @@ def crossfade(x1,x2):
 
 	return(interpolator(np.linspace(1,len(x1),len(x1))))
 
-class codebook:
+class new_codebook:
 
-	def __init__(self,N_codes,N_dim,estimator='LMS',update_mode='recency'):
+	def __init__(
+		self,
+		N_codes,
+		N_dim,
+		codebook_signal,
+		estimator='LMS',
+		update_mode='recency'
+		):
 
 		self.N_codes = N_codes
 		self.N_dim = N_dim
-		self.cdbk = np.zeros(N_codes,N_dim)
+		self.codebook_signal = codebook_signal
 		self.estimator = estimator
 		self.update_mode = update_mode
 
-	def update(self,new_sample):
+		self.N = 2*(N_dim-1)
+
+		self.cdbk = np.zeros([N_codes,N_dim])
+
+		self.init_wave_bank()
+
+		self.window_out = np.zeros([self.N_dim,self.N])
+
+	def update(self):
 		
 		if self.update_mode == 'recency':
-			print('')
+			self.cdbk = np.roll(self.cdbk,1,axis=0)
+			self.cdbk[0,:] = self.codebook_signal.__next__()
 
 		# distances = np.zeros(self.N_codes)
 		# for row in range(self.cdbk.shape[0]):
@@ -342,17 +361,28 @@ class codebook:
 
 		# Codes are unit vectors
 
-
-
-
-
-
-
-
 	def estimate(self,target):
 		if self.estimator == 'LMS':
 			w = np.linalg.pinv(self.cdbk.T)@(target[:,None])
-			return((dictionary.T@w)[:,0])
+			self.last_weight = w.copy()
+			return((self.cdbk.T@w)[:,0])
+
+	def init_wave_bank(self):
+		freqs = np.fft.rfftfreq(self.N,1/44100)
+		self.wave_gen_bank = [window_gen(sin_gen(f,44100),self.N,self.N) for f in freqs]
+
+	def resynthesis(self,target):
+
+		# Estimate code weights
+		est_target = self.estimate(target)
+		est_target = threshold(est_target,type='mean')
+
+		# generate frequencies and modulate
+		# To maintain phase, we have a generator bank
+		for i in range(self.N_dim):
+			self.window_out[i,:] = est_target[i]*self.wave_gen_bank[i].__next__()
+
+		return(np.sum(self.window_out,axis=0))
 
 def test_1():
 	# fn_codebook = 'violin_AM.wav'
@@ -519,17 +549,21 @@ def test_3():
 
 def test_4():
 
-	N = 1024
-	noverlap = 64
+	N = 512
+	noverlap = 0
 	codebook_nrows = 1
 	codebook_ncols = int(N/2)+1
+	Fs = 44100
 
 	fn_codebook = 'flute_C.wav'
 
 	# codebook_signal = 	abs_gen(rfft_gen(sin_window_gen(wav_gen(fn_codebook),N,N-noverlap)))
-	codebook_signal = abs_gen(rfft_gen(sin_window_gen(X_gen(),N,N-noverlap)))
-	tonal_driver = abs_gen(rfft_gen(sin_window_gen(X_gen(),N,N-noverlap)))
-	phase_driver = phase_gen(rfft_gen(sin_window_gen(X_gen(),N,N-noverlap)))
+	codebook_signal = abs_gen(rfft_gen(sin_window_gen(Y_gen(),N,N-noverlap)))
+	# phasebook_signal = plt_gen(window_gen(phase_gen(rfft_gen(sin_window_gen(X_gen(),N,N-noverlap))),128),'phase',1)
+	phasebook_signal = phase_gen(rfft_gen(sin_window_gen(Y_gen(),N,N-noverlap)))
+
+	tonal_driver = abs_gen(rfft_gen(sin_window_gen(Y_gen(),N,N-noverlap)))
+	phase_driver = phase_gen(rfft_gen(sin_window_gen(Y_gen(),N,N-noverlap)))
 
 	if noverlap:
 		overlap_buffer = np.zeros(noverlap)
@@ -538,8 +572,83 @@ def test_4():
 
 	ctr = 0
 
+	previous_phase = np.zeros(int(N/2)+1)
+
 	# Iterate signals
-	for cdbk_sample,tonal_sample,phase_sample in zip(codebook_signal,tonal_driver,phase_driver):
+	for cdbk_sample,tonal_sample,phase_sample,phase_coder in zip(codebook_signal,tonal_driver,phase_driver,phasebook_signal):
+
+		# Update Codebook
+
+		# Update
+		codebook = np.roll(codebook,1,axis=0)
+		codebook[0,:] = cdbk_sample
+	
+		# Fit
+		reconstruction = dictionary_estimator(codebook,tonal_sample)
+		
+		if not ctr%20 and 0:
+			liveplot(codebook,'cdbk')
+			liveplot(reconstruction,'re',1)
+			liveplot(tonal_sample,'tonal',1)
+			liveplot(tonal_sample-reconstruction,'error',1)
+			ctr = 0
+		ctr += 1
+		
+
+		# Phase Correction for windowing delay
+		if (previous_phase == np.zeros(len(phase_sample))).all():
+			previous_phase = phase_sample
+			gd_phase = phase_sample
+		else:
+
+			sample_delay = N-noverlap
+			rad_per_sample = np.fft.rfftfreq(N,1/(2*np.pi))
+			gd_phase = (previous_phase + (rad_per_sample * sample_delay))%(2*np.pi)
+
+			previous_phase = gd_phase
+
+
+ 		# Replace
+
+		signal_out = np.flip(np.fft.irfft(reconstruction*np.exp(1j*gd_phase)))
+		# signal_out = np.flip(np.fft.irfft(reconstruction*np.exp(1j*phase_sample)))
+		# signal_out = np.flip(np.fft.irfft(reconstruction*np.exp(1j*phase_coder)))
+
+		# Overlap crossfade
+		if noverlap:
+			# signal_out[:noverlap] = crossfade(overlap_buffer,signal_out[:noverlap])
+			signal_out[:noverlap] = sin_half_window(noverlap,'start')*signal_out[:noverlap]+sin_half_window(noverlap,'end')*overlap_buffer
+			overlap_buffer = signal_out[-noverlap:]
+
+			# yield(signal_out)
+			yield(signal_out[:-noverlap])
+		else:
+			yield(signal_out)
+
+def test_5():
+
+	N = 2048
+	noverlap = 1024
+	codebook_nrows = 2
+	codebook_ncols = int(N/2)+1
+
+	fn_codebook = 'flute_C.wav'
+
+	# codebook_signal = 	rfft_gen(sin_window_gen(wav_gen(fn_codebook),N,N-noverlap)))
+	codebook_signal = rfft_gen(sin_window_gen(X_gen(),N,N-noverlap))
+
+	tonal_driver = rfft_gen(sin_window_gen(Y_gen(),N,N-noverlap))
+
+
+	if noverlap:
+		overlap_buffer = np.zeros(noverlap)
+
+	codebook = np.zeros([codebook_nrows,codebook_ncols],dtype=np.complex_)
+
+	ctr = 0
+
+	# Iterate signals
+	for cdbk_sample,tonal_sample in zip(codebook_signal,tonal_driver):
 
 		# Update Codebook
 
@@ -559,7 +668,8 @@ def test_4():
 		ctr += 1
 		
  		# Replace
-		signal_out = np.flip(np.fft.irfft(reconstruction*np.exp(1j*phase_sample)))
+		# signal_out = np.flip(np.fft.irfft(reconstruction*np.exp(1j*phase_sample)))
+		signal_out = np.flip(np.fft.irfft(reconstruction))
 
 		# Overlap crossfade
 		if noverlap:
@@ -572,13 +682,47 @@ def test_4():
 		else:
 			yield(signal_out)
 
+def test_6():
+
+	# Config
+	N = 128
+	N_codes = 1
+	cdbk_N_dim = int(N/2)+1
+	Fs = 44100
+	noverlap = 0
+
+	fn_codebook = 'flute_C.wav'
+
+
+	# Signal Generators
+	# codebook_signal = 	abs_gen(rfft_gen(sin_window_gen(wav_gen(fn_codebook),N,N-noverlap)))
+	codebook_signal = abs_gen(rfft_gen(sin_window_gen(Y_gen(),N,N-noverlap)))
+
+	tonal_driver = abs_gen(rfft_gen(sin_window_gen(Y_gen(),N,N-noverlap)))
+
+
+	# Init Codebook
+	codebook = new_codebook(N_codes,cdbk_N_dim,codebook_signal)
+
+	# Iterate Samples
+	for tonal_sample in tonal_driver:
+
+		# Update Codebook
+		codebook.update()
+
+		# Resynthesize
+		reconstruction = codebook.resynthesis(tonal_sample)
+
+		yield(reconstruction)
+
+
 if __name__ == '__main__':
 
 	# m = plt_gen(abs_gen(rfft_gen(plt_gen(main(),'dd',skip=1))),'ff',skip=1)
 	#test_gen = plt_gen(window_gen(test_1(),64),'test_fft',1)
-	test_gen = test_4()
+	test_gen = test_6()
 	samples = []
-	for i in range(200):
+	for i in range(4):
 		samples.append(test_gen.__next__())
 	samples /= max(abs(np.min(samples)),np.max(samples))
 	samples *= 22000
@@ -619,52 +763,5 @@ if __name__ == '__main__':
 # adaptive codebook estimation
 
 # 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
