@@ -2,12 +2,15 @@ import numpy as np
 import matplotlib.pyplot as plt 
 from scipy.io import wavfile
 from scipy.interpolate import interp1d
+from scipy.optimize import nnls
 
 # Reference Material:
 	# https://arxiv.org/pdf/1510.02189.pdf - Sparse approximation based on a random overcomplete basis
 	# http://dafx16.vutbr.cz/dafxpapers/16-DAFx-16_paper_07-PN.pdf - cross fade
 	# http://eeweb.poly.edu/iselesni/EL713/STFT/stft_inverse.pdf - STFT, ISTFT
 	# https://sethares.engr.wisc.edu/vocoders/phasevocoder.html - Phase Vocoder
+	# https://en.wikipedia.org/wiki/Von_Neumann_entropy - Von Neumann Entorpy
+	# http://www.quantum.umb.edu/Jacobs/QMT/QMT_Chapter2.pdf - Useful Concepts from Information Theory
 
 # Lets start simple.
 
@@ -74,15 +77,15 @@ def scale_gen(freqs=[440,523.25]):
 				yield(sample)
 
 def root_scale_gen():
-	f0 = 440
-	scale_freqs = [f0*2**(n/12) for n in np.linspace(-12,12,25)]
+	f0 = 220
+	scale_freqs = [f0*2**(n/12) for n in [0,2,4,5,7,9,11,12]]
 	scale = scale_gen(scale_freqs)
 	for root in scale:
 		yield(root)
 
 def harm_scale_gen():
-	f0 = 440
-	scale_freqs = [f0*2**(n/12) for n in np.linspace(-12,12,25)]
+	f0 = 220
+	scale_freqs = [f0*2**(n/12) for n in [0,2,4,5,7,9,11,12]]
 	oct_scale_freqs = [2*freq for freq in scale_freqs]
 	scale = scale_gen(scale_freqs)
 	harmonics = scale_gen(oct_scale_freqs)
@@ -344,6 +347,12 @@ def threshold(X,mode='mean'):
 		out[X>=X.mean()] = X[X>=X.mean()]
 		return(out)
 
+def VN_entropy(X):
+	_,S,_ = np.linalg.svd(X)
+	return(-np.sum([s*np.log(s) for s in S if s != 0]))
+
+
+
 class new_codebook:
 
 	def __init__(
@@ -351,8 +360,8 @@ class new_codebook:
 		N_codes,
 		N_dim,
 		codebook_signal,
-		estimator='LMS',
-		update_mode='recency'
+		estimator='NNLS',
+		update_mode='von_neumann_entropy'
 		):
 
 		self.N_codes = N_codes
@@ -375,17 +384,27 @@ class new_codebook:
 			self.cdbk = np.roll(self.cdbk,1,axis=0)
 			self.cdbk[0,:] = self.codebook_signal.__next__()
 
-		# distances = np.zeros(self.N_codes)
-		# for row in range(self.cdbk.shape[0]):
-		# 	code = self.cdbk[row,:]
-		# 	distances[row] = np.linalg.norm(new_sample-code)
+		if self.update_mode == 'von_neumann_entropy':
 
-		# Initialize 0
+			new_code = self.codebook_signal.__next__()
+			new_code /= np.linalg.norm(new_code)
 
-		# If 0, replace with new sample
+			entropies = []
 
-		# If no 0, 
+			for i in range(self.cdbk.shape[0]):
 
+				if np.linalg.norm(self.cdbk[i,:]) == 0:
+					self.cdbk[i,:] = new_code
+					return
+
+				cdbk_mod = self.cdbk.copy()
+				cdbk_mod[i,:] = new_code
+
+				entropies.append(VN_entropy(cdbk_mod))
+
+			# liveplot(entropies,'ent',1)
+
+			self.cdbk[np.argmax(entropies),:] = new_code
 
 		# We want to maximize the sum of the angles
 			# Between the codes, including new sample
@@ -403,10 +422,19 @@ class new_codebook:
 		# Codes are unit vectors
 
 	def estimate(self,target):
+
+		# Least mean square
 		if self.estimator == 'LMS':
 			w = np.linalg.pinv(self.cdbk.T)@(target[:,None])
 			self.last_weight = w.copy()
 			return((self.cdbk.T@w)[:,0])
+
+		# Non-negative Least Square
+		if self.estimator == 'NNLS':
+			w = nnls(self.cdbk.T,target[:,None])
+			self.last_weight = w.copy()
+			return((self.cdbk.T@w)[:,0])
+
 
 	def init_wave_bank(self):
 		freqs = np.fft.rfftfreq(self.N,1/44100)
@@ -728,11 +756,11 @@ def test_5():
 def test_6():
 
 	# Config
-	N = 1024
-	N_codes = 1
+	N = 2024
+	N_codes = 8
 	cdbk_N_dim = int(N/2)+1
 	Fs = 44100
-	noverlap = 0
+	noverlap = 128
 
 	fn_codebook = 'flute_C.wav'
 
@@ -751,18 +779,35 @@ def test_6():
 	# Init Codebook
 	codebook = new_codebook(N_codes,cdbk_N_dim,codebook_signal)
 
+	if noverlap:
+		overlap_buffer = np.zeros(noverlap)
+
+	plt_ctr = 0
+
 	# Iterate Samples
 	for tonal_sample,phase_sample,pc_sample in zip(tonal_driver,phase_driver,phase_coder):
 
 		# Update Codebook
 		codebook.update()
 
+		if not plt_ctr%50:
+			liveplot(codebook.cdbk[:,:64],'cdbk')
+			plt_ctr = 0
+		plt_ctr += 1
+
 		# Resynthesize
 		# reconstruction = codebook.resynthesis(tonal_sample)
-		reconstruction = np.flip(np.fft.irfft(codebook.estimate(tonal_sample)*np.exp(1j*pc_sample)))
+		signal_out = np.flip(np.fft.irfft(codebook.estimate(tonal_sample)*np.exp(1j*pc_sample)))
 
-		yield(reconstruction)
+		# Overlap crossfade
+		if noverlap:
+			signal_out[:noverlap] = sin_half_window(noverlap,'start')*signal_out[:noverlap]+sin_half_window(noverlap,'end')*overlap_buffer
+			overlap_buffer = signal_out[-noverlap:]
 
+			# yield(signal_out)
+			yield(signal_out[:-noverlap])
+		else:
+			yield(signal_out)
 
 if __name__ == '__main__':
 
@@ -770,7 +815,7 @@ if __name__ == '__main__':
 	#test_gen = plt_gen(window_gen(test_1(),64),'test_fft',1)
 	test_gen = test_6()
 	samples = []
-	for i in range(600):
+	for i in range(2000):
 		samples.append(test_gen.__next__())
 	samples /= max(abs(np.min(samples)),np.max(samples))
 	samples *= 22000
@@ -784,17 +829,6 @@ if __name__ == '__main__':
 
 	plt.show()
 	
-
-
-
-
-
-
-
-
-
-
-
 
 
 
