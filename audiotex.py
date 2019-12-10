@@ -404,6 +404,9 @@ class new_codebook:
 
 			# liveplot(entropies,'ent',1)
 
+			if VN_entropy(self.cdbk) > np.max(entropies):
+				return
+
 			self.cdbk[np.argmax(entropies),:] = new_code
 
 		# We want to maximize the sum of the angles
@@ -431,9 +434,10 @@ class new_codebook:
 
 		# Non-negative Least Square
 		if self.estimator == 'NNLS':
-			w = nnls(self.cdbk.T,target[:,None])
+			w = nnls(self.cdbk.T,target)[0]
+			liveplot(w,'w',1)
 			self.last_weight = w.copy()
-			return((self.cdbk.T@w)[:,0])
+			return(self.cdbk.T@w)
 
 
 	def init_wave_bank(self):
@@ -760,7 +764,7 @@ def test_6():
 	N_codes = 8
 	cdbk_N_dim = int(N/2)+1
 	Fs = 44100
-	noverlap = 128
+	noverlap = 1024
 
 	fn_codebook = 'flute_C.wav'
 
@@ -815,7 +819,7 @@ if __name__ == '__main__':
 	#test_gen = plt_gen(window_gen(test_1(),64),'test_fft',1)
 	test_gen = test_6()
 	samples = []
-	for i in range(2000):
+	for i in range(400):
 		samples.append(test_gen.__next__())
 	samples /= max(abs(np.min(samples)),np.max(samples))
 	samples *= 22000
