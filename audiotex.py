@@ -54,6 +54,35 @@ def Y_gen():
 		for sample in signal:
 			yield(sample)
 
+def scale_gen(freqs=[440,523.25]):
+	
+	tones = [sin_gen(f,44100) for f in freqs]
+
+	N = 44100
+
+	pulses = [np.array([tone.__next__() for _ in range(N)]) for tone in tones]
+
+	fade_N = 4410
+
+	for pulse in pulses:
+		pulse[:fade_N] *= sin_half_window(fade_N,start_end='start')
+		pulse[-fade_N:] *= sin_half_window(fade_N,start_end='end')		
+
+	while 1:
+		for pulse in pulses:
+			for sample in pulse:
+				yield(sample)
+
+def harm_scale_gen():
+	f0 = 440
+	scale_freqs = [f0*2**(n/12) for n in np.linspace(-12,12,25)]
+	oct_scale_freqs = 2*scale_freqs
+	scale = scale_gen(scale_freqs)
+	harmonics = scale_gen(oct_scale_freqs)
+	for root,harmonic in zip(scale,harmonics):
+		yield(root+harmonic)
+
+
 def sin_gen(f,Fs):
 	if not f:
 		while 1:
@@ -303,6 +332,12 @@ def crossfade(x1,x2):
 
 	return(interpolator(np.linspace(1,len(x1),len(x1))))
 
+def threshold(X,mode='mean'):
+	if mode == 'mean':
+		out = np.zeros(X.shape)
+		out[X>=X.mean()] = X[X>=X.mean()]
+		return(out)
+
 class new_codebook:
 
 	def __init__(
@@ -375,7 +410,9 @@ class new_codebook:
 
 		# Estimate code weights
 		est_target = self.estimate(target)
-		est_target = threshold(est_target,type='mean')
+		est_target = threshold(est_target,mode='mean')
+
+		# liveplot(est_target,'est_target',dim=1)
 
 		# generate frequencies and modulate
 		# To maintain phase, we have a generator bank
@@ -549,7 +586,7 @@ def test_3():
 
 def test_4():
 
-	N = 512
+	N = 1024
 	noverlap = 0
 	codebook_nrows = 1
 	codebook_ncols = int(N/2)+1
@@ -685,7 +722,7 @@ def test_5():
 def test_6():
 
 	# Config
-	N = 128
+	N = 1024
 	N_codes = 1
 	cdbk_N_dim = int(N/2)+1
 	Fs = 44100
@@ -693,25 +730,30 @@ def test_6():
 
 	fn_codebook = 'flute_C.wav'
 
+	f0 = 440
+	scale_freqs = [f0*2**(n/12) for n in np.linspace(-12,12,25)]
 
 	# Signal Generators
 	# codebook_signal = 	abs_gen(rfft_gen(sin_window_gen(wav_gen(fn_codebook),N,N-noverlap)))
-	codebook_signal = abs_gen(rfft_gen(sin_window_gen(Y_gen(),N,N-noverlap)))
+	codebook_signal = abs_gen(rfft_gen(sin_window_gen(harm_scale_gen(),N,N-noverlap)))
+	phase_coder = phase_gen(rfft_gen(sin_window_gen(harm_scale_gen(),N,N-noverlap)))
 
-	tonal_driver = abs_gen(rfft_gen(sin_window_gen(Y_gen(),N,N-noverlap)))
+	tonal_driver = abs_gen(rfft_gen(sin_window_gen(harm_scale_gen(),N,N-noverlap)))
+	phase_driver = phase_gen(rfft_gen(sin_window_gen(harm_scale_gen(),N,N-noverlap)))
 
 
 	# Init Codebook
 	codebook = new_codebook(N_codes,cdbk_N_dim,codebook_signal)
 
 	# Iterate Samples
-	for tonal_sample in tonal_driver:
+	for tonal_sample,phase_sample in zip(tonal_driver,phase_driver):
 
 		# Update Codebook
 		codebook.update()
 
 		# Resynthesize
-		reconstruction = codebook.resynthesis(tonal_sample)
+		# reconstruction = codebook.resynthesis(tonal_sample)
+		reconstruction = np.flip(np.fft.irfft(codebook.estimate(tonal_sample)*np.exp(1j*phase_sample)))
 
 		yield(reconstruction)
 
@@ -722,7 +764,7 @@ if __name__ == '__main__':
 	#test_gen = plt_gen(window_gen(test_1(),64),'test_fft',1)
 	test_gen = test_6()
 	samples = []
-	for i in range(4):
+	for i in range(600):
 		samples.append(test_gen.__next__())
 	samples /= max(abs(np.min(samples)),np.max(samples))
 	samples *= 22000
