@@ -73,15 +73,21 @@ def scale_gen(freqs=[440,523.25]):
 			for sample in pulse:
 				yield(sample)
 
+def root_scale_gen():
+	f0 = 440
+	scale_freqs = [f0*2**(n/12) for n in np.linspace(-12,12,25)]
+	scale = scale_gen(scale_freqs)
+	for root in scale:
+		yield(root)
+
 def harm_scale_gen():
 	f0 = 440
 	scale_freqs = [f0*2**(n/12) for n in np.linspace(-12,12,25)]
-	oct_scale_freqs = 2*scale_freqs
+	oct_scale_freqs = [2*freq for freq in scale_freqs]
 	scale = scale_gen(scale_freqs)
 	harmonics = scale_gen(oct_scale_freqs)
 	for root,harmonic in zip(scale,harmonics):
 		yield(root+harmonic)
-
 
 def sin_gen(f,Fs):
 	if not f:
@@ -738,22 +744,22 @@ def test_6():
 	codebook_signal = abs_gen(rfft_gen(sin_window_gen(harm_scale_gen(),N,N-noverlap)))
 	phase_coder = phase_gen(rfft_gen(sin_window_gen(harm_scale_gen(),N,N-noverlap)))
 
-	tonal_driver = abs_gen(rfft_gen(sin_window_gen(harm_scale_gen(),N,N-noverlap)))
-	phase_driver = phase_gen(rfft_gen(sin_window_gen(harm_scale_gen(),N,N-noverlap)))
+	tonal_driver = abs_gen(rfft_gen(sin_window_gen(root_scale_gen(),N,N-noverlap)))
+	phase_driver = phase_gen(rfft_gen(sin_window_gen(root_scale_gen(),N,N-noverlap)))
 
 
 	# Init Codebook
 	codebook = new_codebook(N_codes,cdbk_N_dim,codebook_signal)
 
 	# Iterate Samples
-	for tonal_sample,phase_sample in zip(tonal_driver,phase_driver):
+	for tonal_sample,phase_sample,pc_sample in zip(tonal_driver,phase_driver,phase_coder):
 
 		# Update Codebook
 		codebook.update()
 
 		# Resynthesize
 		# reconstruction = codebook.resynthesis(tonal_sample)
-		reconstruction = np.flip(np.fft.irfft(codebook.estimate(tonal_sample)*np.exp(1j*phase_sample)))
+		reconstruction = np.flip(np.fft.irfft(codebook.estimate(tonal_sample)*np.exp(1j*pc_sample)))
 
 		yield(reconstruction)
 
